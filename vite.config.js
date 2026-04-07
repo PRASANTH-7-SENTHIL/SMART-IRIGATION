@@ -8,4 +8,13 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  server: {
+    proxy: {
+      '/twilio-api': {
+        target: 'https://api.twilio.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/twilio-api/, '')
+      }
+    }
+  }
 })

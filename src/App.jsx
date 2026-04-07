@@ -10,8 +10,12 @@ import {
   Activity, 
   Wifi, 
   WifiOff,
-  Settings
+  Settings,
+  Brain,
+  Download,
+  FileText
 } from 'lucide-react';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { 
   LineChart, 
   Line, 
@@ -99,6 +103,8 @@ function App() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [toast, setToast] = useState(null);
   const [motorManuallyProcessing, setMotorManuallyProcessing] = useState(false);
+  const [aiReport, setAiReport] = useState("");
+  const [isGeneratingAIReport, setIsGeneratingAIReport] = useState(false);
 
   // Network status monitoring
   useEffect(() => {
@@ -216,6 +222,64 @@ function App() {
     } finally {
       setTimeout(() => setMotorManuallyProcessing(false), 2000); // Debounce
     }
+  };
+
+  const generateAIReport = async () => {
+    if (!data.lastUpdate) {
+      showToast("No sensor data available yet.", "error");
+      return;
+    }
+    
+    // Check if API key is in environment
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+    if (!apiKey) {
+      showToast("Gemini API Key missing in .env", "error");
+      return;
+    }
+
+    setIsGeneratingAIReport(true);
+    try {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+      const prompt = `
+        You are an expert agronomist AI system. Analyze the following IoT sensor data for a smart irrigation system and provide a brief, actionable report. 
+        
+        Current Sensor Data:
+        - Soil Moisture: ${data.moisture}%
+        - Temperature: ${data.temperature}°C
+        - Humidity: ${data.humidity}%
+        - Rain Status: ${data.rain}
+        - Pump Motor Status: ${data.motor}
+        
+        System Mode: ${isAutoMode ? 'Auto' : 'Manual'}
+        
+        Please provide a concise analysis of the current conditions, any potential risks to crops, and recommendations. Format the response in clean text or markdown without using complicated markdown symbols (just simple text formatting with line breaks).
+      `;
+
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      setAiReport(response.text());
+      showToast("AI Report generated successfully", "success");
+    } catch (error) {
+      console.error("AI Generation failed:", error);
+      showToast("Failed to generate AI report", "error");
+    } finally {
+      setIsGeneratingAIReport(false);
+    }
+  };
+
+  const downloadReport = () => {
+    if (!aiReport) return;
+    const blob = new Blob([aiReport], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `Smart_Irrigation_AI_Report_${new Date().toISOString().split('T')[0]}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -478,6 +542,77 @@ function App() {
             </motion.div>
           </div>
         </div>
+
+        {/* AI Analytics Section */}
+        <motion.div 
+          initial={{ opacity: 0, y: 30 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.7 }}
+          className="mt-8 glassmorphism p-6 md:p-8 flex flex-col border-cyan-500/20 shadow-[0_0_20px_rgba(0,255,255,0.05)] relative overflow-hidden"
+        >
+          <div className="absolute top-[-50px] right-[-50px] bg-cyan-500/10 w-40 h-40 blur-[60px] rounded-full pointer-events-none" />
+          
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4 border-b border-white/5 pb-6 relative z-10">
+            <div className="flex items-center gap-3">
+              <div className="p-3 bg-cyan-500/10 rounded-xl border border-cyan-500/30 shadow-[0_0_15px_rgba(0,255,255,0.2)]">
+                <Brain size={28} className="text-cyan-400" />
+              </div>
+              <div>
+                <h3 className="text-xl font-bold tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-400">
+                  Gemini AI Agronomist
+                </h3>
+                <p className="text-sm text-gray-400 mt-1">Generate intelligent insights based on live sensor data</p>
+              </div>
+            </div>
+            
+            <div className="flex gap-3 w-full md:w-auto">
+              <button 
+                onClick={generateAIReport}
+                disabled={isGeneratingAIReport || loading}
+                className={`flex-1 md:flex-none flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-bold text-sm tracking-widest transition-all duration-300 border ${isGeneratingAIReport ? 'bg-cyan-900/50 text-cyan-500 border-cyan-800/50 cursor-not-allowed' : 'bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border-cyan-500/30 hover:border-cyan-400 hover:shadow-[0_0_20px_rgba(0,255,255,0.3)]'}`}
+              >
+                {isGeneratingAIReport ? (
+                  <><Activity size={18} className="animate-spin" /> ANALYZING...</>
+                ) : (
+                  <><Brain size={18} /> GENERATE REPORT</>
+                )}
+              </button>
+              
+              {aiReport && (
+                 <button 
+                  onClick={downloadReport}
+                  className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border border-purple-500/30 hover:border-purple-400 hover:shadow-[0_0_20px_rgba(168,85,247,0.3)] transition-all duration-300"
+                  title="Download Report"
+                >
+                  <Download size={18} />
+                </button>
+              )}
+            </div>
+          </div>
+
+          <AnimatePresence mode="wait">
+            {aiReport ? (
+              <motion.div 
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                className="bg-black/40 rounded-xl p-5 md:p-6 border border-white/5 relative group z-10"
+              >
+                <div className="absolute top-5 right-5 opacity-10 group-hover:opacity-30 transition-opacity pointer-events-none">
+                   <FileText size={48} className="text-cyan-400" />
+                </div>
+                <div className="text-gray-300 leading-relaxed whitespace-pre-wrap max-h-[400px] overflow-y-auto pr-2 custom-scrollbar relative z-10 text-sm md:text-base">
+                  {aiReport}
+                </div>
+              </motion.div>
+            ) : (
+              <div className="py-12 flex flex-col items-center justify-center text-gray-500 gap-3 z-10">
+                <Brain size={48} className="text-gray-600 opacity-30" />
+                <p>Click "Generate Report" to analyze current conditions</p>
+              </div>
+            )}
+          </AnimatePresence>
+        </motion.div>
       </div>
 
       {/* Floating Notifications */}
