@@ -28,10 +28,11 @@ import {
   AreaChart
 } from 'recharts';
 
-// ThingSpeak Configuration
-const CHANNEL_ID_AUTO = '3325845';
-const CHANNEL_ID_MANUAL = '3325851';
-const WRITE_API_KEY_MANUAL = 'BTN2557EQVMF1W9T';
+// ThingSpeak Configuration (using env variables for security)
+const CHANNEL_ID_AUTO = import.meta.env.VITE_THINGSPEAK_CHANNEL_ID_AUTO || '3325845';
+const READ_API_KEY_AUTO = import.meta.env.VITE_THINGSPEAK_READ_API_KEY_AUTO || '9NFJRNFT5GETRR2E';
+const CHANNEL_ID_MANUAL = import.meta.env.VITE_THINGSPEAK_CHANNEL_ID_MANUAL || '3325851';
+const WRITE_API_KEY_MANUAL = import.meta.env.VITE_THINGSPEAK_WRITE_API_KEY_MANUAL || 'BTN2557EQVMF1W9T';
 
 // Glow styles based on value ranges
 const getGlowStyle = (type, value) => {
@@ -105,6 +106,7 @@ function App() {
   const [motorManuallyProcessing, setMotorManuallyProcessing] = useState(false);
   const [aiReport, setAiReport] = useState("");
   const [isGeneratingAIReport, setIsGeneratingAIReport] = useState(false);
+  const [lastMotorStatus, setLastMotorStatus] = useState(null);
 
   // Network status monitoring
   useEffect(() => {
@@ -125,6 +127,40 @@ function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
+  const sendSMS = async (message) => {
+    const accountSid = import.meta.env.VITE_TWILIO_ACCOUNT_SID;
+    const authToken = import.meta.env.VITE_TWILIO_AUTH_TOKEN;
+    const fromNumber = import.meta.env.VITE_TWILIO_PHONE_NUMBER;
+    const toNumber = import.meta.env.VITE_MY_PHONE_NUMBER;
+
+    if (!accountSid || !authToken || !fromNumber || !toNumber) {
+      console.warn("Twilio credentials missing in .env");
+      return;
+    }
+
+    try {
+      const auth = btoa(`${accountSid}:${authToken}`);
+      const params = new URLSearchParams();
+      params.append('To', toNumber);
+      params.append('From', fromNumber);
+      params.append('Body', `🌱 AgriSense Alert: ${message}`);
+
+      await axios.post(
+        `/twilio-api/2010-04-01/Accounts/${accountSid}/Messages.json`,
+        params,
+        {
+          headers: {
+            'Authorization': `Basic ${auth}`,
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        }
+      );
+      console.log(`SMS Sent`);
+    } catch (error) {
+      console.error("Twilio SMS failed:", error.response?.data || error.message);
+    }
+  };
+
   const lastFetchTime = React.useRef(0);
 
   const fetchSensorData = async () => {
@@ -137,8 +173,9 @@ function App() {
     
     try {
       const targetChannel = isAutoMode ? CHANNEL_ID_AUTO : CHANNEL_ID_MANUAL;
+      const apiKeyParam = isAutoMode ? `&api_key=${READ_API_KEY_AUTO}` : '';
       
-      const response = await axios.get(`https://api.thingspeak.com/channels/${targetChannel}/feeds.json?results=20`);
+      const response = await axios.get(`https://api.thingspeak.com/channels/${targetChannel}/feeds.json?results=20${apiKeyParam}`);
       const feeds = response.data.feeds;
       
       if (feeds && feeds.length > 0) {
@@ -152,7 +189,18 @@ function App() {
         
         let motorState = 'OFF';
         if (isAutoMode) {
-          motorState = (moistureRaw < 30 && rainRaw === 'No Rain') ? 'ON' : 'OFF';
+          if (latest.field5 !== undefined && latest.field5 !== null && latest.field5 !== "") {
+            motorState = (latest.field5 === '1' || parseFloat(latest.field5) > 0) ? 'ON' : 'OFF';
+          } else {
+            // Frontend Fallback Logic
+            if (rainRaw === 'Rain' || moistureRaw > 80) {
+              motorState = 'OFF';
+            } else if (moistureRaw < 50) {
+              motorState = 'ON';
+            } else {
+              motorState = 'OFF'; // Default for mid-range if not ON previously
+            }
+          }
         } else {
           motorState = latest.field1 === '1' ? 'ON' : 'OFF';
         }
@@ -165,6 +213,23 @@ function App() {
           motor: motorState,
           lastUpdate: new Date(latest.created_at).toLocaleTimeString()
         });
+
+        // Trigger SMS if motor status changed
+        if (lastMotorStatus !== null && lastMotorStatus !== motorState) {
+          sendSMS(`Water Pump is now ${motorState}. Mode: ${isAutoMode ? 'AUTO' : 'MANUAL'}`);
+        }
+        setLastMotorStatus(motorState);
+
+        // Temperature Condition Alert
+        if (tempRaw > 35) {
+          const lastTempAlert = localStorage.getItem('lastTempAlertTime');
+          const now = Date.now();
+          if (!lastTempAlert || (now - parseInt(lastTempAlert)) > 3600000) { // 1 hour cooldown
+            sendSMS(`High Temperature Alert: ${tempRaw.toFixed(1)}°C. Checking crops recommended.`);
+            showToast(`ALERT: High Temperature (${tempRaw.toFixed(1)}°C)`, 'error');
+            localStorage.setItem('lastTempAlertTime', now.toString());
+          }
+        }
 
         // Parse history for charts
         const parsedHistory = feeds.map(f => {
@@ -214,8 +279,18 @@ function App() {
     try {
       const url = `https://api.thingspeak.com/update?api_key=${WRITE_API_KEY_MANUAL}&field1=${statusVal}`;
       await axios.get(url);
-      setData(prev => ({ ...prev, motor: turnOn ? 'ON' : 'OFF' }));
-      showToast(`Motor turned ${turnOn ? 'ON' : 'OFF'}`, 'success');
+      const newState = turnOn ? 'ON' : 'OFF';
+      
+      // Update local state immediately for UX
+      setData(prev => ({ ...prev, motor: newState }));
+      
+      // Trigger SMS for manual action
+      if (lastMotorStatus !== newState) {
+        sendSMS(`Water Pump is now ${newState}. Mode: MANUAL`);
+        setLastMotorStatus(newState);
+      }
+      
+      showToast(`Motor turned ${newState}`, 'success');
     } catch (error) {
       console.error('Motor control failed', error);
       showToast('Command failed', 'error');
@@ -245,6 +320,13 @@ function App() {
       const prompt = `
         You are an expert agronomist AI system. Analyze the following IoT sensor data for a smart irrigation system and provide a brief, actionable report. 
         
+        System Rules (Auto Mode):
+        - Soil Moisture < 50% -> Motor ON
+        - Soil Moisture > 80% -> Motor OFF
+        - Rain detected -> Motor OFF immediately
+        - Humidity > 85% -> Wait 30 mins, if no rain -> Motor ON
+        - Temperature > 35°C -> Alert generated
+        
         Current Sensor Data:
         - Soil Moisture: ${data.moisture}%
         - Temperature: ${data.temperature}°C
@@ -263,7 +345,7 @@ function App() {
       showToast("AI Report generated successfully", "success");
     } catch (error) {
       console.error("AI Generation failed:", error);
-      showToast("Failed to generate AI report", "error");
+      showToast(`AI Error: ${error.message || "Generation failed"}`, "error");
     } finally {
       setIsGeneratingAIReport(false);
     }
@@ -523,7 +605,7 @@ function App() {
                   <h4 className="text-indigo-300 font-medium text-sm tracking-wide">SYSTEM INTELLIGENCE</h4>
                   <p className="text-gray-400 text-xs mt-1 max-w-md">
                     {isAutoMode 
-                      ? "Operating autonomously. Motor triggers on low moisture & absence of rain." 
+                      ? "Operating autonomously. Motor triggers on <50% moisture, off >80%. Rain or high humidity delays operation." 
                       : "Manual override active. Automatic triggers disabled."}
                   </p>
                 </div>
