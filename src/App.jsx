@@ -29,10 +29,9 @@ import {
 } from 'recharts';
 
 // ThingSpeak Configuration (using env variables for security)
-const CHANNEL_ID_AUTO = import.meta.env.VITE_THINGSPEAK_CHANNEL_ID_AUTO || '3325845';
-const READ_API_KEY_AUTO = import.meta.env.VITE_THINGSPEAK_READ_API_KEY_AUTO || '9NFJRNFT5GETRR2E';
-const CHANNEL_ID_MANUAL = import.meta.env.VITE_THINGSPEAK_CHANNEL_ID_MANUAL || '3325851';
-const WRITE_API_KEY_MANUAL = import.meta.env.VITE_THINGSPEAK_WRITE_API_KEY_MANUAL || 'BTN2557EQVMF1W9T';
+const CHANNEL_ID = import.meta.env.VITE_THINGSPEAK_CHANNEL_ID || '3325845';
+const READ_API_KEY = import.meta.env.VITE_THINGSPEAK_READ_API_KEY || '9NFJRNFT5GETRR2E';
+const WRITE_API_KEY = import.meta.env.VITE_THINGSPEAK_WRITE_API_KEY || 'D43QD5S5NIQ4S9JW';
 
 // Glow styles based on value ranges
 const getGlowStyle = (type, value) => {
@@ -122,6 +121,14 @@ function App() {
     };
   }, []);
 
+  // Motor Status Change SMS Alert
+  useEffect(() => {
+    if (lastMotorStatus !== null && lastMotorStatus !== data.motor) {
+      sendSMS(`Water Pump is now ${data.motor}. Mode: ${isAutoMode ? 'AUTO' : 'MANUAL'}`);
+    }
+    setLastMotorStatus(data.motor);
+  }, [data.motor, isAutoMode]);
+
   const showToast = (message, type = 'info') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 4000);
@@ -172,22 +179,35 @@ function App() {
     lastFetchTime.current = now;
     
     try {
-      const targetChannel = isAutoMode ? CHANNEL_ID_AUTO : CHANNEL_ID_MANUAL;
-      const apiKeyParam = isAutoMode ? `&api_key=${READ_API_KEY_AUTO}` : '';
-      
-      const response = await axios.get(`https://api.thingspeak.com/channels/${targetChannel}/feeds.json?results=20${apiKeyParam}`);
+      // Always fetch sensor data from the single channel
+      const response = await axios.get(`https://api.thingspeak.com/channels/${CHANNEL_ID}/feeds.json?results=20&api_key=${READ_API_KEY}`);
       const feeds = response.data.feeds;
       
       if (feeds && feeds.length > 0) {
-        const latest = feeds[feeds.length - 1];
+        // Accumulate the most recent non-null values from the last 20 feeds
+        const latest = {
+          field1: null, field2: null, field3: null, field4: null, field5: null, field6: null,
+          created_at: feeds[feeds.length - 1].created_at
+        };
         
-        // Remove random data to ensure accuracy. Fall back to 0 if null.
+        for (const f of feeds) {
+          if (f.field1 !== null && f.field1 !== undefined) latest.field1 = f.field1;
+          if (f.field2 !== null && f.field2 !== undefined) latest.field2 = f.field2;
+          if (f.field3 !== null && f.field3 !== undefined) latest.field3 = f.field3;
+          if (f.field4 !== null && f.field4 !== undefined) latest.field4 = f.field4;
+          if (f.field5 !== null && f.field5 !== undefined) latest.field5 = f.field5;
+          if (f.field6 !== null && f.field6 !== undefined) latest.field6 = f.field6;
+          // Keep updating the time to the latest entry we process
+          latest.created_at = f.created_at;
+        }
+        
+        // Use accumulated latest data
         const moistureRaw = parseFloat(latest.field1) || 0;
         const rainRaw = parseFloat(latest.field2) > 0 ? 'Rain' : 'No Rain';
         const tempRaw = parseFloat(latest.field3) || 0;
         const humRaw = parseFloat(latest.field4) || 0;
         
-        let motorState = 'OFF';
+        let motorState = null;
         if (isAutoMode) {
           if (latest.field5 !== undefined && latest.field5 !== null && latest.field5 !== "") {
             motorState = (latest.field5 === '1' || parseFloat(latest.field5) > 0) ? 'ON' : 'OFF';
@@ -202,23 +222,26 @@ function App() {
             }
           }
         } else {
-          motorState = latest.field1 === '1' ? 'ON' : 'OFF';
+          // In Manual mode, motor state is read from field6
+          if (latest.field6 !== undefined && latest.field6 !== null && latest.field6 !== "") {
+            motorState = (latest.field6 === '1' || parseFloat(latest.field6) > 0) ? 'ON' : 'OFF';
+          }
         }
 
-        setData({
-          moisture: moistureRaw.toFixed(1),
-          rain: rainRaw,
-          temperature: tempRaw.toFixed(1),
-          humidity: humRaw.toFixed(1),
-          motor: motorState,
-          lastUpdate: new Date(latest.created_at).toLocaleTimeString()
+        setData(prevData => {
+          const finalMotorState = motorState !== null ? motorState : prevData.motor;
+
+          return {
+            moisture: moistureRaw.toFixed(1),
+            rain: rainRaw,
+            temperature: tempRaw.toFixed(1),
+            humidity: humRaw.toFixed(1),
+            motor: finalMotorState,
+            lastUpdate: new Date(latest.created_at).toLocaleTimeString()
+          };
         });
 
-        // Trigger SMS if motor status changed
-        if (lastMotorStatus !== null && lastMotorStatus !== motorState) {
-          sendSMS(`Water Pump is now ${motorState}. Mode: ${isAutoMode ? 'AUTO' : 'MANUAL'}`);
-        }
-        setLastMotorStatus(motorState);
+
 
         // Temperature Condition Alert
         if (tempRaw > 35) {
@@ -277,18 +300,12 @@ function App() {
     setMotorManuallyProcessing(true);
     const statusVal = turnOn ? 1 : 0;
     try {
-      const url = `https://api.thingspeak.com/update?api_key=${WRITE_API_KEY_MANUAL}&field1=${statusVal}`;
+      const url = `https://api.thingspeak.com/update?api_key=${WRITE_API_KEY}&field6=${statusVal}`;
       await axios.get(url);
       const newState = turnOn ? 'ON' : 'OFF';
       
       // Update local state immediately for UX
       setData(prev => ({ ...prev, motor: newState }));
-      
-      // Trigger SMS for manual action
-      if (lastMotorStatus !== newState) {
-        sendSMS(`Water Pump is now ${newState}. Mode: MANUAL`);
-        setLastMotorStatus(newState);
-      }
       
       showToast(`Motor turned ${newState}`, 'success');
     } catch (error) {
@@ -315,7 +332,7 @@ function App() {
     setIsGeneratingAIReport(true);
     try {
       const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+      const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
       const prompt = `
         You are an expert agronomist AI system. Analyze the following IoT sensor data for a smart irrigation system and provide a brief, actionable report. 
@@ -618,7 +635,7 @@ function App() {
                 <div className="w-[1px] h-8 bg-white/10 mx-2 hidden md:block"></div>
                  <div className="flex flex-col items-end">
                    <p className="text-xs text-gray-500 tracking-wider">CHANNEL</p>
-                   <p className="text-sm font-mono text-cyan-500">{isAutoMode ? CHANNEL_ID_AUTO : CHANNEL_ID_MANUAL}</p>
+                   <p className="text-sm font-mono text-cyan-500">{CHANNEL_ID}</p>
                  </div>
               </div>
             </motion.div>
